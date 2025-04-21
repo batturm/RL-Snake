@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RL Snake Game</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        canvas {
+            background-color: #1f2937; /* Tailwind gray-800 */
+            border: 1px solid #4b5563; /* Tailwind gray-600 */
+            border-radius: 0.5rem; /* Tailwind rounded-lg */
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            display: block; /* Prevents extra space below canvas */
+        }
+        .controls button {
+            transition: all 0.2s ease-in-out;
+        }
+        .controls button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 10px rgba(0, 0, 0, 0.15);
+        }
+        .controls button:active {
+            transform: translateY(0);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .info-box {
+            min-width: 200px; /* Ensure consistent width */
+            text-align: center;
+        }
+    </style>
+</head>
+<body class="bg-gray-200 py-10">
+
+    <div class="container mx-auto max-w-4xl bg-white p-6 md:p-8 rounded-xl shadow-xl">
+
+        <h1 class="text-3xl font-bold text-gray-800 mb-8 text-center">Reinforcement Learning Snake</h1>
+
+        <div class="flex flex-col md:flex-row items-center md:items-start justify-center space-y-6 md:space-y-0 md:space-x-8 mb-8">
+            <canvas id="gameCanvas" width="400" height="400"></canvas>
+
+            <div class="flex flex-col space-y-4 w-full md:w-auto">
+                 <div class="info-box bg-gray-50 p-4 rounded-lg shadow border border-gray-200">
+                    <h2 class="text-lg font-semibold text-gray-700 mb-2">Game Info</h2>
+                    <p class="text-gray-600">Score: <span id="score" class="font-medium text-blue-600">0</span></p>
+                    <p class="text-gray-600">High Score: <span id="highScore" class="font-medium text-green-600">0</span></p>
+                    <p class="text-gray-600">Episode: <span id="episode" class="font-medium text-purple-600">0</span></p>
+                </div>
+                <div class="info-box bg-gray-50 p-4 rounded-lg shadow border border-gray-200">
+                    <h2 class="text-lg font-semibold text-gray-700 mb-2">Agent Info</h2>
+                    <p class="text-gray-600">Epsilon: <span id="epsilon" class="font-medium">1.00</span></p>
+                    <p class="text-gray-600">Learning Rate: <span id="learningRate" class="font-medium">0.001</span></p>
+                     <p class="text-gray-600">Status: <span id="status" class="font-medium text-yellow-600">Idle</span></p>
+                </div>
+            </div> </div> <div class="controls flex justify-center space-x-4 mb-6">
+            <button id="startTrainingBtn" class="px-5 py-2 bg-blue-500 text-white font-semibold rounded-lg shadow hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2 focus:ring-offset-white">Start Training</button>
+            <button id="stopTrainingBtn" class="px-5 py-2 bg-red-500 text-white font-semibold rounded-lg shadow hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-2 focus:ring-offset-white" disabled>Stop Training</button>
+            <button id="watchAgentBtn" class="px-5 py-2 bg-green-500 text-white font-semibold rounded-lg shadow hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-offset-2 focus:ring-offset-white" disabled>Watch Best Agent</button>
+        </div>
+
+         <p class="text-sm text-gray-500 text-center">Watch the agent learn to play Snake! (Rendering enabled during training)</p>
+
+    </div> <script>
+        // --- Game Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scale = 20; // Size of each grid cell
+        const rows = canvas.height / scale;
+        const cols = canvas.width / scale;
+
+        // --- UI Elements ---
+        const scoreEl = document.getElementById('score');
+        const highScoreEl = document.getElementById('highScore');
+        const episodeEl = document.getElementById('episode');
+        const epsilonEl = document.getElementById('epsilon');
+        const learningRateEl = document.getElementById('learningRate');
+        const statusEl = document.getElementById('status');
+        const startTrainingBtn = document.getElementById('startTrainingBtn');
+        const stopTrainingBtn = document.getElementById('stopTrainingBtn');
+        const watchAgentBtn = document.getElementById('watchAgentBtn');
+
+        // --- Game State ---
+        let snake;
+        let food;
+        let score;
+        let highScore = 0;
+        let direction; // 0: up, 1: right, 2: down, 3: left
+        let gameLoopTimeout;
+        let episode = 0;
+        let isTraining = false;
+        let isWatching = false;
+
+        // --- RL Agent Parameters ---
+        const STATE_SIZE = 11;
+        const ACTION_SIZE = 4;
+        const LEARNING_RATE = 0.001;
+        let epsilon = 1.0;
+        const epsilonMin = 0.01;
+        const epsilonDecay = 0.995;
+        const gamma = 0.95;
+
+        let model;
+
+        // --- Helper Functions ---
+        function setupGame() {
+            // Initialize snake position, direction, score, and place food
+            snake = [{ x: Math.floor(cols / 2) * scale, y: Math.floor(rows / 2) * scale }];
+            direction = 1; // Start moving right
+            score = 0;
+            scoreEl.textContent = score;
+            placeFood();
+            // Update status text and color
+            const statusText = isTraining ? 'Training...' : (isWatching ? 'Watching...' : 'Idle');
+            const statusColor = isTraining ? 'text-blue-600' : (isWatching ? 'text-green-600' : 'text-yellow-600');
+            statusEl.textContent = statusText;
+            statusEl.className = `font-medium ${statusColor}`; // Apply color class
+        }
+
+        function placeFood() {
+            // Place food randomly on the grid, ensuring it's not on the snake
+            let foodX, foodY;
+            let validPosition = false;
+            while (!validPosition) {
+                foodX = Math.floor(Math.random() * cols) * scale;
+                foodY = Math.floor(Math.random() * rows) * scale;
+                validPosition = !snake.some(segment => segment.x === foodX && segment.y === foodY);
+            }
+            food = { x: foodX, y: foodY };
+        }
+
+        function draw() {
+            // Clear canvas
+            ctx.fillStyle = '#1f2937'; // Tailwind gray-800
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw food
+            ctx.fillStyle = '#ef4444'; // Tailwind red-500
+            ctx.fillRect(food.x, food.y, scale, scale);
+            ctx.strokeStyle = '#f87171'; // Tailwind red-400
+            ctx.strokeRect(food.x, food.y, scale, scale);
+
+            // Draw snake
+            snake.forEach((segment, index) => {
+                ctx.fillStyle = index === 0 ? '#10b981' : '#34d399'; // Head is brighter
+                ctx.fillRect(segment.x, segment.y, scale, scale);
+                ctx.strokeStyle = '#6ee7b7';
+                ctx.strokeRect(segment.x, segment.y, scale, scale);
+            });
+        }
+
+        function moveSnake() {
+            // Calculate new head position based on direction
+            const head = { ...snake[0] };
+            switch (direction) {
+                case 0: head.y -= scale; break; // Up
+                case 1: head.x += scale; break; // Right
+                case 2: head.y += scale; break; // Down
+                case 3: head.x -= scale; break; // Left
+            }
+            snake.unshift(head); // Add new head
+
+            // Check for food consumption
+            if (head.x === food.x && head.y === food.y) {
+                score++;
+                scoreEl.textContent = score;
+                if (score > highScore) {
+                    highScore = score;
+                    highScoreEl.textContent = highScore;
+                }
+                placeFood();
+                return 'ate_food';
+            } else {
+                snake.pop(); // Remove tail if no food eaten
+                return 'moved';
+            }
+        }
+
+        function checkCollision() {
+            // Check for wall or self collision
+            const head = snake[0];
+            if (head.x < 0 || head.x >= canvas.width || head.y < 0 || head.y >= canvas.height) {
+                return true; // Wall collision
+            }
+            for (let i = 1; i < snake.length; i++) {
+                if (head.x === snake[i].x && head.y === snake[i].y) {
+                    return true; // Self collision
+                }
+            }
+            return false;
+        }
+
+         // --- RL Agent Logic ---
+
+        function createModel() {
+            // Define and compile the neural network model
+            const newModel = tf.sequential();
+            newModel.add(tf.layers.dense({ units: 128, inputShape: [STATE_SIZE], activation: 'relu' }));
+            newModel.add(tf.layers.dense({ units: 128, activation: 'relu' }));
+            newModel.add(tf.layers.dense({ units: ACTION_SIZE, activation: 'linear' }));
+            newModel.compile({ optimizer: tf.train.adam(LEARNING_RATE), loss: 'meanSquaredError' });
+            console.log("Model created successfully.");
+            learningRateEl.textContent = LEARNING_RATE.toExponential(1);
+            return newModel;
+        }
+
+        function getState() {
+            // Generate the state representation based on snake's surroundings and food location
+            const head = snake[0];
+            const point_l = { x: head.x - scale, y: head.y };
+            const point_r = { x: head.x + scale, y: head.y };
+            const point_u = { x: head.x, y: head.y - scale };
+            const point_d = { x: head.x, y: head.y + scale };
+            const dir_l = direction === 3;
+            const dir_r = direction === 1;
+            const dir_u = direction === 0;
+            const dir_d = direction === 2;
+
+            const state = [
+                (dir_r && isCollision(point_r)) || (dir_l && isCollision(point_l)) || (dir_u && isCollision(point_u)) || (dir_d && isCollision(point_d)), // Danger straight
+                (dir_u && isCollision(point_r)) || (dir_d && isCollision(point_l)) || (dir_l && isCollision(point_u)) || (dir_r && isCollision(point_d)), // Danger right
+                (dir_u && isCollision(point_l)) || (dir_d && isCollision(point_r)) || (dir_r && isCollision(point_u)) || (dir_l && isCollision(point_d)), // Danger left
+                dir_l, dir_r, dir_u, dir_d, // Move direction
+                food.x < head.x, food.x > head.x, food.y < head.y, food.y > head.y // Food location
+            ];
+            return state.map(Number); // Convert booleans to 0/1
+        }
+
+        function isCollision(point) {
+            // Helper to check collision at a specific point (wall or snake body)
+            if (point.x < 0 || point.x >= canvas.width || point.y < 0 || point.y >= canvas.height) return true;
+            return snake.some(segment => segment.x === point.x && segment.y === point.y);
+        }
+
+        async function chooseAction(state) {
+            // Choose action using epsilon-greedy strategy
+            epsilonEl.textContent = epsilon.toFixed(2);
+            if (Math.random() <= epsilon && isTraining) {
+                return Math.floor(Math.random() * ACTION_SIZE); // Explore
+            } else {
+                // Exploit: Use tf.tidy to manage memory during prediction
+                return tf.tidy(() => {
+                    const qValues = model.predict(tf.tensor2d([state]));
+                    // Get the index (action) with the highest Q-value
+                    return qValues.argMax(1).dataSync()[0];
+                });
+            }
+        }
+
+        async function trainStep(state, action, reward, nextState, done) {
+            // Perform one step of Q-learning update using Bellman equation
+            let target = reward;
+            if (!done) {
+                // Use tf.tidy for prediction to manage memory
+                const nextQValues = await tf.tidy(() => model.predict(tf.tensor2d([nextState])));
+                target = reward + gamma * nextQValues.max(1).dataSync()[0];
+            }
+
+            // Get current Q-values and update the one for the action taken
+            const currentQValuesTensor = await tf.tidy(() => model.predict(tf.tensor2d([state])));
+            const currentQValues = await currentQValuesTensor.data();
+            tf.dispose(currentQValuesTensor); // Dispose tensor after getting data
+            currentQValues[action] = target;
+
+            // Train the model with the state and updated Q-values
+            await model.fit(tf.tensor2d([state]), tf.tensor2d([currentQValues]), { epochs: 1, verbose: 0 });
+
+            // Decay epsilon (exploration rate)
+            if (isTraining && epsilon > epsilonMin) {
+                epsilon *= epsilonDecay;
+            }
+        }
+
+        // --- Game Loop ---
+        async function gameLoop() {
+            // Main loop controlling game steps, agent actions, training, and rendering
+            if (!isTraining && !isWatching) {
+                 // Update status if loop stopped externally
+                const statusText = 'Stopped';
+                const statusColor = 'text-red-600';
+                statusEl.textContent = statusText;
+                statusEl.className = `font-medium ${statusColor}`;
+                return; // Exit loop if stopped
+            }
+
+            // 1. Get state
+            const currentState = getState();
+            // 2. Choose action
+            const action = await chooseAction(currentState);
+            // 3. Perform action (update direction, prevent 180 turns)
+            const oppositeDirection = (direction + 2) % 4;
+            if (action !== oppositeDirection) direction = action;
+            // 4. Move snake
+            const moveResult = moveSnake();
+            // 5. Calculate reward & check done
+            let reward = 0;
+            let done = false;
+            if (checkCollision()) {
+                reward = -10; // Penalty for collision
+                done = true;
+            } else if (moveResult === 'ate_food') {
+                reward = 10; // Reward for eating food
+            }
+            // 6. Get next state
+            const nextState = getState();
+            // 7. Train model (if training)
+            if (isTraining) {
+                await trainStep(currentState, action, reward, nextState, done);
+            }
+
+            // 8. Handle game over
+            if (done) {
+                console.log(`Episode ${episode} finished. Score: ${score}. Epsilon: ${epsilon.toFixed(3)}`);
+                episode++;
+                episodeEl.textContent = episode;
+                // Draw the final frame before resetting
+                draw();
+                setupGame(); // Reset for next episode
+                 // Note: Status is updated within setupGame
+            }
+
+            // 9. Draw the current game state (ALWAYS draw if loop is running)
+            draw();
+
+            // 10. Continue loop
+            clearTimeout(gameLoopTimeout);
+            // Use 0ms delay for training (fast logic), 50ms for watching (visible speed)
+            const currentSpeed = isWatching ? 50 : 0;
+            gameLoopTimeout = setTimeout(gameLoop, currentSpeed);
+        }
+
+        // --- Event Listeners ---
+        startTrainingBtn.addEventListener('click', () => {
+            // Start training mode
+            if (!model) { alert("Model not initialized yet."); return; }
+            if (isTraining) return; // Prevent starting if already training
+            console.log("Starting training...");
+            isTraining = true; isWatching = false; epsilon = 1.0; episode = 0;
+            episodeEl.textContent = episode;
+            // Update button states
+            startTrainingBtn.disabled = true; stopTrainingBtn.disabled = false; watchAgentBtn.disabled = true;
+            setupGame(); // Setup game and update status text
+            gameLoop(); // Start the loop (draws first frame)
+        });
+
+        stopTrainingBtn.addEventListener('click', () => {
+            // Stop training or watching
+            if (!isTraining && !isWatching) return; // Do nothing if already stopped
+            console.log("Stopping training/watching...");
+            isTraining = false; isWatching = false;
+            clearTimeout(gameLoopTimeout); // Stop the game loop
+            // Update button states
+            startTrainingBtn.disabled = false; stopTrainingBtn.disabled = true; watchAgentBtn.disabled = !model; // Enable watch if model exists
+            // Update status display manually as loop is stopped
+            statusEl.textContent = 'Stopped';
+            statusEl.className = 'font-medium text-red-600';
+        });
+
+         watchAgentBtn.addEventListener('click', () => {
+            // Start watching mode
+            if (!model) { alert("No trained model available."); return; }
+            if (isWatching) return; // Prevent starting if already watching
+            console.log("Watching best agent...");
+            isTraining = false; isWatching = true; epsilon = 0; // Exploit only
+             // Update button states
+            startTrainingBtn.disabled = true; stopTrainingBtn.disabled = false; watchAgentBtn.disabled = true;
+            setupGame(); // Setup game and update status text
+            gameLoop(); // Start the loop (draws first frame)
+        });
+
+        // --- Initialization ---
+        window.onload = () => {
+            // Initialize TF.js backend, create model, setup game
+            const initialStatus = 'Initializing Model...';
+            const initialColor = 'text-purple-600';
+            statusEl.textContent = initialStatus;
+            statusEl.className = `font-medium ${initialColor}`;
+
+            tf.setBackend('webgl').then(() => {
+                console.log("TensorFlow.js backend set to WebGL.");
+                model = createModel();
+                watchAgentBtn.disabled = false; // Enable watch button now
+                setupGame(); // Setup game and update status to Idle
+                draw(); // Draw initial game state once loaded
+            }).catch(err => {
+                 // Handle errors during initialization
+                 console.error("Error setting TF backend or creating model:", err);
+                 statusEl.textContent = 'Error Initializing!';
+                 statusEl.className = 'font-medium text-red-600';
+                 alert("Could not initialize TensorFlow.js. Check console for errors.");
+            });
+        };
+
+    </script>
+
+</body>
+</html>
